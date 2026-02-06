@@ -1,0 +1,310 @@
+clc
+clear
+
+%% Step 0: Load Merged Dataset
+%% Load datasets and outline functions
+% Datasets
+data = readtable('merged_flux_weather.xlsx');
+background_data = readtable('spring25_backgroundFluxes_continuous.xlsx');
+forward_data = readtable('z6-13359_WH_forwardData.xlsx');
+
+% Functions
+% Function for R2 and RMSE
+calcMetrics = @(y,yhat) struct( ...
+    'RMSE', sqrt(mean((y - yhat).^2)), ...
+    'R2', 1 - sum((y - yhat).^2)/sum((y - mean(y)).^2) );
+
+%% Step 1: Compute excess CH4 flux
+% Calculate excess CH4 flux by subtracting the 2 standard deviations above
+% the background value
+
+flux_raw = data.CH4_Flux;
+bg_flux   = background_data.CH4_Flux;
+bg_mean   = mean(bg_flux, 'omitnan');
+bg_std    = std(bg_flux, 'omitnan');
+bg_thresh = bg_mean + 3*bg_std;
+
+excess_flux = flux_raw - bg_thresh;
+excess_flux(excess_flux < 0) = 0; 
+data.Excess_CH4 = excess_flux;
+
+%% Step 2: Select predictor variables variables
+predictorVars = {'W_m2SolarRadiation', 'degreesWindDirection', 'm_sWindSpeed','m_sGustSpeed','degree_CAirTemperature', 'kPaVaporPressure','kPaAtmosphericPressure', 'm3_m3WaterContent', 'degree_CSoilTemperature', 'mS_cmSaturationExtractEC', 'm3_m3WaterContent_1', 'degree_CSoilTemperature_1', 'mS_cmSaturationExtractEC_1', 'kPaMatricPotential', 'degree_CSoilTemperature_2', 'degree_C30CmSoilTemperature4', 'degree_C50CmSoilTemperature5', 'degree_C100CmSoilTemperature6'};
+
+X = data{:, predictorVars};
+
+tbl = data(:, [{'Excess_CH4',}, predictorVars]);
+
+%% Step 3: Model 1 - Regression Tree
+% Fit the regression tree model to the data
+M1 = fitrtree(tbl, ...
+    'Excess_CH4 ~ W_m2SolarRadiation + degreesWindDirection + m_sWindSpeed + m_sGustSpeed + degree_CAirTemperature + kPaVaporPressure + kPaAtmosphericPressure + m3_m3WaterContent + degree_CSoilTemperature + mS_cmSaturationExtractEC + m3_m3WaterContent_1 + degree_CSoilTemperature_1 + mS_cmSaturationExtractEC_1 + kPaMatricPotential + degree_CSoilTemperature_2 + degree_C30CmSoilTemperature4 + degree_C50CmSoilTemperature5 + degree_C100CmSoilTemperature6');
+
+
+% view(M1, 'Mode','graph');  % visualize tree
+
+yhat1 = predict(M1, tbl);
+metrics1 = calcMetrics(data.Excess_CH4, yhat1);
+
+% Plot unvalidated version
+figure('Units','centimeters','Position',[5 5 14 12]); hold on;
+scatter(data.Excess_CH4, yhat1, 45, 'MarkerFaceColor',[0.1 0.6 0.2], ...
+    'MarkerEdgeColor','k','MarkerFaceAlpha',0.7);
+lims = [min(data.Excess_CH4) max(data.Excess_CH4)];
+plot(lims, lims, 'k--','LineWidth',1.6);
+
+xlabel('Observed Excess CH_4 Flux (\mumol m^{-2} s^{-1})','FontWeight','bold');
+ylabel('Predicted Excess CH_4 Flux (\mumol m^{-2} s^{-1})','FontWeight','bold');
+title('Regression Tree Model','FontWeight','bold');
+grid on; axis equal; xlim(lims); ylim(lims);
+
+text(0.05,0.95, sprintf('R^2 = %.2f\nRMSE = %.2f', metrics1.R2, metrics1.RMSE), ...
+    'Units','normalized','HorizontalAlignment','left','VerticalAlignment','top', ...
+    'FontSize',12,'FontWeight','bold','BackgroundColor','w','Margin',4);
+
+
+% 10 fold cross-validated version
+cvM1 = crossval(M1, 'KFold', 10);
+
+% Predictions and metrics
+yhat1_cv = kfoldPredict(cvM1);
+metrics1_cv = calcMetrics(data.Excess_CH4, yhat1_cv);
+
+fprintf('Regression Tree (10-fold CV): R2 = %.3f, RMSE = %.3f\n', ...
+    metrics1_cv.R2, metrics1_cv.RMSE);
+
+% Plot cross-validated version
+figure('Units','centimeters','Position',[5 5 14 12]); hold on;
+scatter(data.Excess_CH4, yhat1_cv, 45, 'MarkerFaceColor',[0.1 0.6 0.2], ...
+    'MarkerEdgeColor','k','MarkerFaceAlpha',0.7);
+lims = [min(data.Excess_CH4) max(data.Excess_CH4)];
+plot(lims, lims, 'k--','LineWidth',1.6);
+
+xlabel('Observed Excess CH_4 Flux (\mumol m^{-2} s^{-1})','FontWeight','bold');
+ylabel('Predicted Excess CH_4 Flux (\mumol m^{-2} s^{-1})','FontWeight','bold');
+title('Regression Tree Model (10-fold CV)','FontWeight','bold');
+grid on; axis equal; xlim(lims); ylim(lims);
+
+text(0.05,0.95, sprintf('R^2 = %.2f\nRMSE = %.2f', metrics1_cv.R2, metrics1_cv.RMSE), ...
+    'Units','normalized','HorizontalAlignment','left','VerticalAlignment','top', ...
+    'FontSize',12,'FontWeight','bold','BackgroundColor','w','Margin',4);
+
+%% Step 4: Model 2 - Bagged Ensemble (Random Forest style)
+% Fit the bagged ensemble model to the data
+M2 = fitrensemble(tbl, ...
+    'Excess_CH4 ~ W_m2SolarRadiation + degreesWindDirection + m_sWindSpeed + m_sGustSpeed + degree_CAirTemperature + kPaVaporPressure + kPaAtmosphericPressure + m3_m3WaterContent + degree_CSoilTemperature + mS_cmSaturationExtractEC + m3_m3WaterContent_1 + degree_CSoilTemperature_1 + mS_cmSaturationExtractEC_1 + kPaMatricPotential + degree_CSoilTemperature_2 + degree_C30CmSoilTemperature4 + degree_C50CmSoilTemperature5 + degree_C100CmSoilTemperature6', ...
+    'Method','Bag', ...
+    'NumLearningCycles',100, ...
+    'Learners','tree');
+
+yhat2 = predict(M2, tbl);
+metrics2 = calcMetrics(data.Excess_CH4, yhat2);
+
+figure('Units','centimeters','Position',[5 5 14 12]); hold on;
+scatter(data.Excess_CH4, yhat2, 45, 'MarkerFaceColor',[0.9 0.5 0.1], ...
+    'MarkerEdgeColor','k','MarkerFaceAlpha',0.7);
+lims = [min(data.Excess_CH4) max(data.Excess_CH4)];
+plot(lims, lims, 'k--','LineWidth',1.6);
+
+xlabel('Observed Excess CH_4 Flux (\mumol m^{-2} s^{-1})','FontWeight','bold');
+ylabel('Predicted Excess CH_4 Flux (\mumol m^{-2} s^{-1})','FontWeight','bold');
+title('Bagged Ensemble Model','FontWeight','bold');
+grid on; axis equal; xlim(lims); ylim(lims);
+
+text(0.05,0.95, sprintf('R^2 = %.2f\nRMSE = %.2f', metrics2.R2, metrics2.RMSE), ...
+    'Units','normalized','HorizontalAlignment','left','VerticalAlignment','top', ...
+    'FontSize',12,'FontWeight','bold','BackgroundColor','w','Margin',4);
+
+% 10-fold cross-validated version
+cvM2 = crossval(M2, 'KFold', 10);
+
+% Predictions and metrics
+yhat2_cv = kfoldPredict(cvM2);
+metrics2_cv = calcMetrics(data.Excess_CH4, yhat2_cv);
+
+fprintf('Bagged Ensemble (10-fold CV): R2 = %.3f, RMSE = %.3f\n', ...
+    metrics2_cv.R2, metrics2_cv.RMSE);
+
+% Plot cross-validated version
+figure('Units','centimeters','Position',[5 5 14 12]); hold on;
+scatter(data.Excess_CH4, yhat2_cv, 45, 'MarkerFaceColor',[0.9 0.5 0.1], ...
+    'MarkerEdgeColor','k','MarkerFaceAlpha',0.7);
+lims = [min(data.Excess_CH4) max(data.Excess_CH4)];
+plot(lims, lims, 'k--','LineWidth',1.6);
+
+xlabel('Observed Excess CH_4 Flux (\mumol m^{-2} s^{-1})','FontWeight','bold');
+ylabel('Predicted Excess CH_4 Flux (\mumol m^{-2} s^{-1})','FontWeight','bold');
+title('Bagged Ensemble Model (10-fold CV)','FontWeight','bold');
+grid on; axis equal; xlim(lims); ylim(lims);
+
+text(0.05,0.95, sprintf('R^2 = %.2f\nRMSE = %.2f', metrics2_cv.R2, metrics2_cv.RMSE), ...
+    'Units','normalized','HorizontalAlignment','left','VerticalAlignment','top', ...
+    'FontSize',12,'FontWeight','bold','BackgroundColor','w','Margin',4);
+
+
+%% Step 5: Walk-forward CV (expanding window) for both models
+fprintf('\n=== Walk-forward CV (expanding window) for Regression Tree and Bagged Ensemble ===\n');
+
+n = height(data);
+initialWindow = round(0.2*n);   % first (x)% for initial training
+horizon = 1;                    % 1-step ahead forecast
+
+% Preallocate
+y_true_tree = [];
+y_pred_tree = [];
+y_true_rf   = [];
+y_pred_rf   = [];
+
+for t = initialWindow:(n - horizon)
+    trainIdx = 1:t;
+    testIdx  = t+1:t+horizon;
+    
+    % --- Regression Tree ---
+    M_tree_tmp = fitrtree(data(trainIdx,:), ...
+        ['Excess_CH4 ~ ', strjoin(predictorVars, ' + ')]);
+    yhat_tree_tmp = predict(M_tree_tmp, data(testIdx,:));
+    y_pred_tree = [y_pred_tree; yhat_tree_tmp(:)];
+    y_true_tree = [y_true_tree; data.Excess_CH4(testIdx)];
+    
+    % --- Bagged Ensemble ---
+    M_rf_tmp = fitrensemble(data(trainIdx,:), ...
+        ['Excess_CH4 ~ ', strjoin(predictorVars, ' + ')], ...
+        'Method','Bag','NumLearningCycles',100,'Learners','tree');
+    yhat_rf_tmp = predict(M_rf_tmp, data(testIdx,:));
+    y_pred_rf = [y_pred_rf; yhat_rf_tmp(:)];
+    y_true_rf = [y_true_rf; data.Excess_CH4(testIdx)];
+end
+
+% Compute metrics
+metrics_walk_tree = calcMetrics(y_true_tree, y_pred_tree);
+metrics_walk_rf   = calcMetrics(y_true_rf,   y_pred_rf);
+
+fprintf('Walk-forward CV - Regression Tree: R2 = %.3f, RMSE = %.3f\n', ...
+    metrics_walk_tree.R2, metrics_walk_tree.RMSE);
+fprintf('Walk-forward CV - Bagged Ensemble: R2 = %.3f, RMSE = %.3f\n', ...
+    metrics_walk_rf.R2, metrics_walk_rf.RMSE);
+
+% --- Plot side-by-side observed vs predicted ---
+figure('Units','centimeters','Position',[5 5 28 12]);
+
+% Regression Tree
+subplot(1,2,1); hold on;
+scatter(y_true_tree, y_pred_tree, 45, 'MarkerFaceColor',[0.2 0.6 0.2], ...
+    'MarkerEdgeColor','k','MarkerFaceAlpha',0.7);
+lims = [min([y_true_tree; y_pred_tree]) max([y_true_tree; y_pred_tree])];
+plot(lims, lims, 'k--','LineWidth',1.6);
+xlabel('Observed Excess CH_4 Flux'); ylabel('Predicted Flux');
+title('Walk-forward CV: Regression Tree');
+grid on; axis equal; xlim(lims); ylim(lims);
+text(0.05,0.95, sprintf('R^2 = %.2f\nRMSE = %.2f', metrics_walk_tree.R2, metrics_walk_tree.RMSE), ...
+    'Units','normalized','HorizontalAlignment','left','VerticalAlignment','top', ...
+    'FontSize',12,'FontWeight','bold','BackgroundColor','w','Margin',4);
+
+% Bagged Ensemble
+subplot(1,2,2); hold on;
+scatter(y_true_rf, y_pred_rf, 45, 'MarkerFaceColor',[0.9 0.5 0.1], ...
+    'MarkerEdgeColor','k','MarkerFaceAlpha',0.7);
+lims = [min([y_true_rf; y_pred_rf]) max([y_true_rf; y_pred_rf])];
+plot(lims, lims, 'k--','LineWidth',1.6);
+xlabel('Observed Excess CH_4 Flux'); ylabel('Predicted Flux');
+title('Walk-forward CV: Bagged Ensemble');
+grid on; axis equal; xlim(lims); ylim(lims);
+text(0.05,0.95, sprintf('R^2 = %.2f\nRMSE = %.2f', metrics_walk_rf.R2, metrics_walk_rf.RMSE), ...
+    'Units','normalized','HorizontalAlignment','left','VerticalAlignment','top', ...
+    'FontSize',12,'FontWeight','bold','BackgroundColor','w','Margin',4);
+
+%% Step 6: Model Comparison
+% Residuals for walk-forward predictions
+res_tree_wf = y_pred_tree - data.Excess_CH4(initialWindow+1:end);
+res_rf_wf   = y_pred_rf - data.Excess_CH4(initialWindow+1:end);
+
+% Scatter plot of residuals vs observed (only predicted part)
+figure('Units','centimeters','Position',[5 5 14 12]); hold on;
+scatter(data.Excess_CH4(initialWindow+1:end), res_tree_wf, 25, 'b', 'filled', 'MarkerFaceAlpha',0.5);
+scatter(data.Excess_CH4(initialWindow+1:end), res_rf_wf,   25, 'r', 'filled', 'MarkerFaceAlpha',0.5);
+yline(0,'k--');
+xlabel('Observed Flux'); ylabel('Residual');
+legend('Regression Tree','Bagged Ensemble (Random Forest)','Location','best');
+title('Residual Comparison (Walk-Forward Predictions)');
+grid on;
+
+% Statistical comparison
+[h,p] = ttest(res_tree_wf, res2);
+if h==1
+    fprintf('Difference in residuals is statistically significant (p = %.3f)\n', p);
+else
+    fprintf('No significant difference in residuals (p = %.3f)\n', p);
+end
+
+% Variable importance
+imp = oobPermutedPredictorImportance(M2);
+figure('Units','centimeters','Position',[5 5 14 12]); hold on;
+bar(imp); xticklabels(predictorVars); xtickangle(45);
+ylabel('Importance'); title('Random Forest Predictor Importance');
+
+% Mean absolute error
+MAE_tree = mean(abs(yhat1 - data.Excess_CH4));
+MAE_rf   = mean(abs(yhat2 - data.Excess_CH4));
+
+fprintf('Mean Absolute Error:\n');
+fprintf('Regression Tree: %.3f\n', MAE_tree);
+fprintf('Bagged Ensemble: %.3f\n', MAE_rf);
+
+
+%% Step 7: Predicting Excess CH4 in forward data
+% Convert timestamps
+timevals = datetime(forward_data.Start_Time, 'InputFormat','yyyy-MM-dd HH:mm:ss');
+
+% Optional precipitation column
+if ismember('mmPrecipitation', forward_data.Properties.VariableNames)
+    precip = forward_data.mmPrecipitation;
+else
+    precip = zeros(height(forward_data),1);
+end
+
+% Predict using pre-trained models
+yhat_tree = predict(M1, forward_data);  % Regression Tree
+yhat_rf   = predict(M2, forward_data);  % Bagged Ensemble
+
+% Optional smoothing (moving average)
+windowSize = 2000;  % adjust based on time resolution
+y_tree_smooth = movmean(yhat_tree, windowSize);
+y_rf_smooth   = movmean(yhat_rf, windowSize);
+
+% Aggregate weekly precipitation (optional for context)
+time_week = dateshift(timevals,'start','week');
+[G, weekID] = findgroups(time_week);
+precip_weekly = splitapply(@sum, precip, G);
+time_weekly   = unique(time_week);
+
+% Plot forecast with precipitation
+figure('Units','centimeters','Position',[5 5 28 12]); 
+
+% Precipitation on right axis
+yyaxis right
+bar(time_weekly, precip_weekly, 1.0, ...
+    'FaceColor',[0.4 0.7 1.0], 'EdgeColor','none', ...
+    'FaceAlpha',0.25, 'DisplayName','Weekly Precipitation');
+ylabel('Weekly Precipitation (mm)','FontWeight','bold');
+
+% CH4 flux predictions on left axis
+yyaxis left
+hold on
+plot(timevals, y_tree_smooth, 'Color',[0.1 0.6 0.2], 'LineWidth',2, 'DisplayName','Regression Tree');
+plot(timevals, y_rf_smooth,   'Color',[0.9 0.5 0.1], 'LineWidth',2, 'DisplayName','Bagged Ensemble');
+
+ylabel('Predicted Excess CH_4 Flux (\mumol m^{-2} s^{-1})','FontWeight','bold');
+grid on; box on;
+
+% RMSE ribbons
+fill([timevals; flipud(timevals)], [y_tree_smooth + metrics_walk_tree.RMSE; flipud(y_tree_smooth - metrics_walk_tree.RMSE)], ...
+     [0.37 0.82 0.51], 'FaceAlpha',0.2, 'EdgeColor','none', 'DisplayName','±Tree RMSE');
+
+fill([timevals; flipud(timevals)], [y_rf_smooth + metrics_walk_base.RMSE; flipud(y_rf_smooth - metrics_walk_base.RMSE)], ...
+     [0.93 0.65 0.37], 'FaceAlpha',0.2, 'EdgeColor','none', 'DisplayName','±RF RMSE');
+
+xlabel('Time','FontWeight','bold');
+title('Forward-Predicted Excess CH_4 Flux','FontWeight','bold');
+xlim([min(timevals) max(timevals)]);
+legend('Location','best','Box','off');
+ax = gca; ax.XTickLabelRotation = 45;

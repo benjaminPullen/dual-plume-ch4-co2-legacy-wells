@@ -1,0 +1,211 @@
+%% Full PCA Workflow for CH4 Flux Analysis
+% Author: Benjamin Pullen
+% Date: 10/09/2025
+% -----------------------------------------------
+
+%clear; close all; clc;
+
+%% ----------------- Load Data -----------------
+data = readtable("merged_flux_weather.xlsx");
+bg_data = readtable("spring25_backgroundFluxes_continuous.xlsx");
+
+%% ----------------- Excess CH4 Flux -----------------
+flux_raw = data.CH4_Flux;
+bg_flux = bg_data.CH4_Flux;
+
+% Background threshold (mean + 3*std)
+bg_mean = mean(bg_flux, 'omitnan');
+bg_std  = std(bg_flux, 'omitnan');
+bg_thresh = bg_mean + 3*bg_std;
+
+% Compute excess flux
+excess_flux = flux_raw - bg_thresh;
+excess_flux(excess_flux < 0) = 0; 
+data.Excess_CH4_Flux = excess_flux;
+
+%% ----------------- Predictor Variables -----------------
+% Full list
+% predictorVars = data(:, { ...
+%     'W_m2SolarRadiation', ...
+%     'degreesWindDirection', ...
+%     'm_sWindSpeed', ...
+%     'm_sGustSpeed', ...
+%     'degree_CAirTemperature', ...
+%     'kPaVaporPressure', ...
+%     'kPaAtmosphericPressure', ...
+%     'kPaVPD', ...
+%     'm3_m3WaterContent', ...
+%     'degree_CSoilTemperature', ...
+%     'mS_cmSaturationExtractEC', ...
+%     'm3_m3WaterContent_1', ...
+%     'degree_CSoilTemperature_1', ...
+%     'mS_cmSaturationExtractEC_1', ...
+%     'kPaMatricPotential', ...
+%     'degree_CSoilTemperature_2', ...
+%     'degree_C30CmSoilTemperature4', ...
+%     'degree_C50CmSoilTemperature5', ...
+%     'degree_C100CmSoilTemperature6' ...
+%     }); 
+
+% Reduced list
+predictorVars = data(:, { ...
+    'm_sWindSpeed', ...
+    'kPaAtmosphericPressure', ...
+    'kPaVPD', ...
+    'm3_m3WaterContent', ...
+    'degree_CSoilTemperature', ...
+    'kPaMatricPotential', ...
+    'degree_C100CmSoilTemperature6' ...
+    }); 
+
+predictorNames = predictorVars.Properties.VariableNames;
+X = table2array(predictorVars);
+Xz = zscore(X);
+
+%% ----------------- Run PCA -----------------
+[coeff, score, latent, tsquared, explained, mu] = pca(Xz);
+numPCs = 5; % focus on first 5 PCs
+topN = 5;  % top 5 variables per PC
+
+%% ----------------- Color Palette -----------------
+pcColors = lines(numPCs); % distinct colors for each PC
+
+%% ----------------- Scree Plot with Cumulative Variance -----------------
+numPCs = 5; % first 5 PCs
+explainedPCs = explained(1:numPCs);
+cumVar = cumsum(explainedPCs); % cumulative variance
+
+figure('Position',[100 100 700 400]); hold on;
+
+% Bar plot: individual PC variance
+bar(1:numPCs, explainedPCs, 0.6, 'FaceColor',[0.2 0.6 0.8], 'DisplayName','Individual PC', 'FontSize',16);
+
+% Line plot: cumulative variance
+yyaxis right
+plot(1:numPCs, cumVar, '-o', 'Color',[0.9 0.3 0.2], 'LineWidth',2, 'MarkerSize',8, 'DisplayName','Cumulative');
+ylabel('Cumulative Variance (%)','FontSize',22);
+
+% Left axis for bars
+yyaxis left
+ylabel('Variance Explained (%)','FontSize',22);
+
+xlabel('Principal Component','FontSize',22);
+xticks(1:numPCs); xticklabels(strcat("PC", string(1:numPCs)));
+%title('Variance Explained and Cumulative Variance by Principal Components','FontSize',14);
+
+grid on; box on; 
+legend('Location','northwest');
+
+
+%% ----------------- Top Variable Loadings -----------------
+topVars = cell(topN, numPCs);
+topVals = nan(topN, numPCs);
+
+for pc = 1:numPCs
+    loadings = coeff(:,pc);
+    [~, idx] = sort(abs(loadings), 'descend');
+    topVars(:,pc) = predictorNames(idx(1:topN))';
+    topVals(:,pc) = loadings(idx(1:topN));
+end
+
+disp('--- Top Variables per PC (names) ---'); disp(topVars);
+disp('--- Top Variables per PC (loadings) ---'); disp(topVals);
+
+% Heatmap using imagesc with labels
+figure('Position',[100 100 700 500]);
+imagesc(topVals); colormap(parula); caxis([-1 1]); colorbar;
+xlabel('Principal Component','FontSize',12); ylabel('Rank (1 = strongest)','FontSize',12);
+title('Top 5 Variable Loadings per PC','FontSize',14);
+set(gca, 'XTick', 1:numPCs, 'XTickLabel', strcat("PC", string(1:numPCs)), 'FontSize',10);
+set(gca, 'YTick', 1:topN, 'YTickLabel', strcat("Rank", string(1:topN)));
+
+% Overlay variable names + loading values
+for r = 1:topN
+    for c = 1:numPCs
+        text(c, r, sprintf('%s\n%.2f', topVars{r,c}, topVals(r,c)), ...
+            'HorizontalAlignment','center','VerticalAlignment','middle', ...
+            'FontSize',9,'FontWeight','bold','Color','k');
+    end
+end
+axis tight; box on;
+
+%% ----------------- Correlation of PCs with CH4 Flux -----------------
+pc_flux_corr = zeros(1,numPCs);
+pc_flux_pval = zeros(1,numPCs);
+
+for pc = 1:numPCs
+    [r,p] = corr(score(:,pc), data.Excess_CH4_Flux, 'Rows','complete');
+    pc_flux_corr(pc) = r;
+    pc_flux_pval(pc) = p;
+end
+
+disp('--- Correlation of PCs with Excess CH4 Flux ---');
+for pc = 1:numPCs
+    fprintf('PC%d: r = %.3f, p = %.3f\n', pc, pc_flux_corr(pc), pc_flux_pval(pc));
+end
+
+% Bar plot of correlations
+figure('Position',[100 100 600 400]);
+bar(pc_flux_corr,'FaceColor',[0.3 0.7 0.4], 'FontSize',16); 
+xlabel('Principal Component','FontSize',22); 
+ylabel('Correlation with Excess CH4 Flux','FontSize',22);
+%title('PC Correlations with CH4 Flux','FontSize',14); grid on; box on;
+
+%% ----------------- Scatter Plots with Regression -----------------
+for pc = 1:numPCs
+    figure('Position',[100 100 600 400]); hold on;
+    
+    % Scatter of data
+    hScatter = scatter(score(:,pc), data.Excess_CH4_Flux, 60, 'filled', 'MarkerFaceColor', pcColors(pc,:));
+    
+    % Regression line
+    mdl = fitlm(score(:,pc), data.Excess_CH4_Flux);
+    hFitLine = plot(mdl); % returns handles to line and confidence interval
+    
+    % Extract handles: first is fit line, second and third are confidence bounds
+    hLine = hFitLine(1); % fitted line
+    hCI  = hFitLine(2:3); % lower and upper 95% CI lines
+    
+    % Customize legend
+    legend([hScatter, hLine, hCI(1)], {'Data (Excess CH_4 Flux)', 'Linear Fit', '95% Confidence'}, ...
+           'Location','northwest','FontSize',10);
+    
+    % Labels and formatting
+    xlabel(sprintf('PC%d Score', pc),'FontSize',12);
+    ylabel('Excess CH4 Flux (µmol m^{-2} s^{-1})','FontSize',12);
+    title(sprintf('PC%d vs Excess CH4 Flux', pc),'FontSize',14);
+    grid on; box on;
+end
+
+%% ----------------- Multiple Regression -----------------
+mdl_all = fitlm(score(:,1:numPCs), data.Excess_CH4_Flux);
+disp('--- Multiple Regression of Excess CH4 Flux on PCs 1-5 ---');
+disp(mdl_all);
+
+%% ----------------- PCR: Scatter Plot & Model Stats -----------------
+% Predict CH4 flux from first 5 PCs
+yObs = data.Excess_CH4_Flux;
+yPred = predict(mdl_all, score(:,1:numPCs));
+
+% Scatter plot observed vs predicted
+figure('Position',[100 100 600 400]);
+scatter(yObs, yPred, 50, 'filled', 'MarkerFaceColor',[0.2 0.6 0.8]);
+hold on;
+plot([min(yObs) max(yObs)], [min(yObs) max(yObs)], 'r--', 'LineWidth',2); % 1:1 line
+xlabel('Observed Excess CH_4 Flux (µmol m^{-2} s^{-1})','FontSize',12);
+ylabel('Predicted Excess CH_4 Flux (µmol m^{-2} s^{-1})','FontSize',12);
+title('PCR: Observed vs Predicted Excess CH_4 Flux','FontSize',14);
+grid on; box on;
+
+% Model statistics
+R2 = mdl_all.Rsquared.Ordinary;
+R2_adj = mdl_all.Rsquared.Adjusted;
+RMSE = mdl_all.RMSE;
+fprintf('\n--- PCR Model Statistics ---\n');
+fprintf('R² = %.3f\n', R2);
+fprintf('Adjusted R² = %.3f\n', R2_adj);
+fprintf('RMSE = %.3f µmol m^{-2} s^{-1}\n', RMSE);
+
+% Optional: Display coefficients for each PC
+disp('PCR Coefficients (PC1-PC5):');
+disp(mdl_all.Coefficients);
